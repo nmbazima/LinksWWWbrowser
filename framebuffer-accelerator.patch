@@ -1,0 +1,162 @@
+---
+ drivers/video/fbdev/core/fbmem.c |   89 +++++++++++++++++++++++++++++++++++++++
+ include/uapi/linux/fb.h          |   12 ++++-
+ 2 files changed, 100 insertions(+), 1 deletion(-)
+
+Index: linux-4.14.2/drivers/video/fbdev/core/fbmem.c
+===================================================================
+--- linux-4.14.2.orig/drivers/video/fbdev/core/fbmem.c	2017-11-29 03:31:51.000000000 +0100
++++ linux-4.14.2/drivers/video/fbdev/core/fbmem.c	2017-11-29 03:32:39.000000000 +0100
+@@ -1086,6 +1086,13 @@ fb_blank(struct fb_info *info, int blank
+ }
+ EXPORT_SYMBOL(fb_blank);
+ 
++static int support_accel_fillrect(struct fb_info *info)
++{
++	return (info->fix.visual == FB_VISUAL_PSEUDOCOLOR ||
++		info->fix.visual == FB_VISUAL_STATIC_PSEUDOCOLOR) &&
++		info->var.bits_per_pixel == 8;
++}
++
+ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
+ 			unsigned long arg)
+ {
+@@ -1096,6 +1103,8 @@ static long do_fb_ioctl(struct fb_info *
+ 	struct fb_cmap cmap_from;
+ 	struct fb_cmap_user cmap;
+ 	struct fb_event event;
++	struct fb_fillrect accel_fillrect;
++	struct fb_copyarea accel_copyarea;
+ 	void __user *argp = (void __user *)arg;
+ 	long ret = 0;
+ 
+@@ -1213,6 +1222,80 @@ static long do_fb_ioctl(struct fb_info *
+ 		unlock_fb_info(info);
+ 		console_unlock();
+ 		break;
++	case FBIO_ACCEL_SUPPORT:
++		if (!lock_fb_info(info))
++			return -ENODEV;
++		if (support_accel_fillrect(info)) {
++			ret |= FB_ACCEL_FILLRECT_SUPPORTED;
++			if (info->flags & FBINFO_HWACCEL_FILLRECT)
++				ret |= FB_ACCEL_FILLRECT_ACCELERATED;
++		}
++		ret |= FB_ACCEL_COPYAREA_SUPPORTED;
++		if (info->flags & FBINFO_HWACCEL_COPYAREA)
++			ret |= FB_ACCEL_COPYAREA_ACCELERATED;
++		if (info->fbops->fb_sync)
++			ret |= FB_ACCEL_SYNC_NEEDED;
++		unlock_fb_info(info);
++		break;
++	case FBIO_ACCEL_SYNC:
++		if (!lock_fb_info(info))
++			return -ENODEV;
++		console_lock();
++		if (info->fbops->fb_sync)
++			info->fbops->fb_sync(info);
++		console_unlock();
++		unlock_fb_info(info);
++		break;
++	case FBIO_ACCEL_FILLRECT:
++	case FBIO_ACCEL_FILLRECT_SYNC:
++		if (copy_from_user(&accel_fillrect, argp, sizeof(accel_fillrect)))
++			return -EFAULT;
++		if (!lock_fb_info(info))
++			return -ENODEV;
++		console_lock();
++		if (!support_accel_fillrect(info)) {
++			ret = -EOPNOTSUPP;
++		} else if (accel_fillrect.dx + accel_fillrect.width < accel_fillrect.dx ||
++			   accel_fillrect.dx + accel_fillrect.width > info->var.xres_virtual ||
++			   accel_fillrect.dy + accel_fillrect.height < accel_fillrect.dy ||
++			   accel_fillrect.dy + accel_fillrect.height > info->var.yres_virtual ||
++			   accel_fillrect.rop > ROP_XOR ||
++			   accel_fillrect.color >= 0x100) {
++			ret = -EINVAL;
++		} else if (!accel_fillrect.width || !accel_fillrect.height) {
++		} else {
++			info->fbops->fb_fillrect(info, &accel_fillrect);
++		}
++		if (cmd == FBIO_ACCEL_FILLRECT_SYNC && info->fbops->fb_sync)
++			info->fbops->fb_sync(info);
++		console_unlock();
++		unlock_fb_info(info);
++		break;
++	case FBIO_ACCEL_COPYAREA:
++	case FBIO_ACCEL_COPYAREA_SYNC:
++		if (copy_from_user(&accel_copyarea, argp, sizeof(accel_copyarea)))
++			return -EFAULT;
++		if (!lock_fb_info(info))
++			return -ENODEV;
++		console_lock();
++		if (accel_copyarea.sx + accel_copyarea.width < accel_copyarea.sx ||
++		    accel_copyarea.sx + accel_copyarea.width > info->var.xres_virtual ||
++		    accel_copyarea.sy + accel_copyarea.height < accel_copyarea.sy ||
++		    accel_copyarea.sy + accel_copyarea.height > info->var.yres_virtual ||
++		    accel_copyarea.dx + accel_copyarea.width < accel_copyarea.dx ||
++		    accel_copyarea.dx + accel_copyarea.width > info->var.xres_virtual ||
++		    accel_copyarea.dy + accel_copyarea.height < accel_copyarea.dy ||
++		    accel_copyarea.dy + accel_copyarea.height > info->var.yres_virtual) {
++			ret = -EINVAL;
++		} else if (!accel_copyarea.width || !accel_copyarea.height) {
++		} else {
++			info->fbops->fb_copyarea(info, &accel_copyarea);
++		}
++		if (cmd == FBIO_ACCEL_COPYAREA_SYNC && info->fbops->fb_sync)
++			info->fbops->fb_sync(info);
++		console_unlock();
++		unlock_fb_info(info);
++		break;
+ 	default:
+ 		if (!lock_fb_info(info))
+ 			return -ENODEV;
+@@ -1360,6 +1443,12 @@ static long fb_compat_ioctl(struct file
+ 	case FBIOPUT_CON2FBMAP:
+ 		arg = (unsigned long) compat_ptr(arg);
+ 	case FBIOBLANK:
++	case FBIO_ACCEL_SUPPORT:
++	case FBIO_ACCEL_SYNC:
++	case FBIO_ACCEL_FILLRECT:
++	case FBIO_ACCEL_FILLRECT_SYNC:
++	case FBIO_ACCEL_COPYAREA:
++	case FBIO_ACCEL_COPYAREA_SYNC:
+ 		ret = do_fb_ioctl(info, cmd, arg);
+ 		break;
+ 
+Index: linux-4.14.2/include/uapi/linux/fb.h
+===================================================================
+--- linux-4.14.2.orig/include/uapi/linux/fb.h	2017-11-29 03:31:51.000000000 +0100
++++ linux-4.14.2/include/uapi/linux/fb.h	2017-11-29 03:32:39.000000000 +0100
+@@ -35,6 +35,12 @@
+ #define FBIOPUT_MODEINFO        0x4617
+ #define FBIOGET_DISPINFO        0x4618
+ #define FBIO_WAITFORVSYNC	_IOW('F', 0x20, __u32)
++#define FBIO_ACCEL_SUPPORT	0x4630
++#define FBIO_ACCEL_SYNC		0x4631
++#define FBIO_ACCEL_FILLRECT	0x4632
++#define FBIO_ACCEL_FILLRECT_SYNC 0x4633
++#define FBIO_ACCEL_COPYAREA	0x4634
++#define FBIO_ACCEL_COPYAREA_SYNC 0x4635
+ 
+ #define FB_TYPE_PACKED_PIXELS		0	/* Packed Pixels	*/
+ #define FB_TYPE_PLANES			1	/* Non interleaved planes */
+@@ -334,7 +340,6 @@ struct fb_vblank {
+ 	__u32 reserved[4];		/* reserved for future compatibility */
+ };
+ 
+-/* Internal HW accel */
+ #define ROP_COPY 0
+ #define ROP_XOR  1
+ 
+@@ -399,5 +404,10 @@ struct fb_cursor {
+ #define FB_BACKLIGHT_MAX	0xFF
+ #endif
+ 
++#define FB_ACCEL_FILLRECT_SUPPORTED	0x00000001
++#define FB_ACCEL_FILLRECT_ACCELERATED	0x00000002
++#define FB_ACCEL_COPYAREA_SUPPORTED	0x00000004
++#define FB_ACCEL_COPYAREA_ACCELERATED	0x00000008
++#define FB_ACCEL_SYNC_NEEDED		0x40000000
+ 
+ #endif /* _UAPI_LINUX_FB_H */

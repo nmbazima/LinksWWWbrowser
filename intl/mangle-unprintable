@@ -1,0 +1,15 @@
+#!/bin/sh
+LC_ALL=C
+export LC_ALL
+a="sed"
+i=1
+while [ $i -lt 256 ]; do
+	if [ $i -lt 32 -o $i -ge 127 ]; then
+		oct="`printf %03o $i`"
+		char="`printf \\\\$oct`"
+		a="$a -e 's/$char/\\\\\\\\$oct/g'"
+	fi
+	i=`expr $i + 1`
+done
+# bash and dash differ here: bash creates double backslashes, dash single
+echo "$a"|sed 's/\\\\\\\\/\\\\/g'
